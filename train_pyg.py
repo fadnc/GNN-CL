@@ -21,7 +21,20 @@ def compute_metrics(y_true, y_pred, y_prob=None):
             metrics['auc'] = 0.0
     return metrics
 
-def train_epoch(model, data, optimizer, train_idx, batch_size=16384):
+def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
+    """
+    logits: (N, C)
+    targets: (N,)
+    """
+    probs = F.softmax(logits, dim=1)
+    pt = probs[range(len(targets)), targets]
+    logp = torch.log(pt + 1e-12)
+    loss = -alpha * ((1 - pt) ** gamma) * logp
+    return loss.mean()
+
+def train_epoch(model, data, optimizer, train_idx, batch_size=8192,
+                use_focal=True, class_weights=None):
+
     model.train()
     total_loss = 0.0
     n_batches = 0
@@ -30,32 +43,32 @@ def train_epoch(model, data, optimizer, train_idx, batch_size=16384):
     edge_attr = data['user','transacts','merchant'].edge_attr
     labels = data['user','transacts','merchant'].y
 
-    # Shuffle train indices
-    perm = torch.randperm(train_idx.size(0))
+    # move node features to device once
+    data['user'].x = data['user'].x.to(DEVICE)
+    data['merchant'].x = data['merchant'].x.to(DEVICE)
+
+    perm = torch.randperm(train_idx.size(0), device=train_idx.device)
     train_idx = train_idx[perm]
 
     for i in range(0, train_idx.size(0), batch_size):
+
         batch_edges = train_idx[i:i+batch_size]
-        src = edge_index[0,batch_edges].to(DEVICE)
-        dst = edge_index[1,batch_edges].to(DEVICE)
+
+        # 1️⃣ recompute node embeddings EVERY BATCH
+        node_embs = model.forward_nodes(data)
+
+        src = edge_index[0, batch_edges].to(DEVICE)
+        dst = edge_index[1, batch_edges].to(DEVICE)
         e_attr = edge_attr[batch_edges].to(DEVICE)
         y = labels[batch_edges].to(DEVICE)
 
-        # Prepare subgraph node feature tensors (select all nodes for simplicity)
-        # If memory becomes an issue, implement neighbor sampling; here we use full node features
-        data_to_device = {}
-        # We'll move node features to device
-        data['user'].x = data['user'].x.to(DEVICE)
-        data['merchant'].x = data['merchant'].x.to(DEVICE)
+        logits = model.forward_edges(node_embs, src, dst, e_attr)
 
-        logits = model(data.to(DEVICE))
-        # logits shape = (E_all, 2) — but to avoid computing all edges every batch, we instead compute only for batch edges:
-        # For simplicity implement model.forward_edge which computes only for batch edges (but our model currently returns for all edges).
-        # To keep simple: compute logits_all then select
-        logits_all = logits  # (E_all,2)
-        logits_batch = logits_all[batch_edges].to(DEVICE)
+        if use_focal:
+            loss = focal_loss(logits, y, alpha=0.25, gamma=2.0)
+        else:
+            loss = F.cross_entropy(logits, y, weight=class_weights)
 
-        loss = F.cross_entropy(logits_batch, y)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -64,28 +77,48 @@ def train_epoch(model, data, optimizer, train_idx, batch_size=16384):
         total_loss += loss.item()
         n_batches += 1
 
-        # move node features back to cpu to free memory if needed
-        # (optional)
-    return total_loss / max(1, n_batches)
+    return total_loss / max(n_batches, 1)
+
+
 
 @torch.no_grad()
 def evaluate(model, data, split_idx):
     model.eval()
+
+    data['user'].x = data['user'].x.to(DEVICE)
+    data['merchant'].x = data['merchant'].x.to(DEVICE)
+
+    node_embs = model.forward_nodes(data)
+
     edge_index = data['user','transacts','merchant'].edge_index
     edge_attr = data['user','transacts','merchant'].edge_attr
     labels = data['user','transacts','merchant'].y
 
-    # move to device
-    data['user'].x = data['user'].x.to(DEVICE)
-    data['merchant'].x = data['merchant'].x.to(DEVICE)
+    batch_size = 32768
+    preds, probs, y_true = [], [], []
 
-    logits_all = model(data.to(DEVICE))  # (E_all,2)
-    probs = F.softmax(logits_all, dim=1)[:,1].cpu().numpy()
-    preds = logits_all.argmax(dim=1).cpu().numpy()
-    y_true = labels.cpu().numpy()
+    for i in range(0, split_idx.size(0), batch_size):
+        batch_edges = split_idx[i:i+batch_size]
 
-    metrics = compute_metrics(y_true[split_idx.cpu().numpy()], preds[split_idx.cpu().numpy()], probs[split_idx.cpu().numpy()])
-    return metrics
+        src = edge_index[0, batch_edges].to(DEVICE)
+        dst = edge_index[1, batch_edges].to(DEVICE)
+        e_attr = edge_attr[batch_edges].to(DEVICE)
+        y = labels[batch_edges].to(DEVICE)
+
+        logits = model.forward_edges(node_embs, src, dst, e_attr)
+        p = F.softmax(logits, dim=1)[:,1].cpu().numpy()
+        pr = logits.argmax(dim=1).cpu().numpy()
+
+        preds.append(pr)
+        probs.append(p)
+        y_true.append(y.cpu().numpy())
+
+    preds = np.concatenate(preds)
+    probs = np.concatenate(probs)
+    y_true = np.concatenate(y_true)
+
+    return compute_metrics(y_true, preds, probs)
+
 
 def main():
     # Load graph
