@@ -8,17 +8,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
-MANIFEST
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
-
 
 # PyBuilder
 .pybuilder/
 target/
 git 
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
