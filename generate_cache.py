@@ -4,10 +4,11 @@ import torch
 from torch_geometric.data import HeteroData
 from models.fraud_gnn_pyg import FraudGNNHybrid
 from tqdm import tqdm
+from collections import defaultdict
 
 GRAPH_PATH = "data/processed/fraud_graph_pyg.pt"
 MODEL_PATH = "best_fraudgnn.pth"
-OUT_DIR = "cache"
+OUT_DIR = "data/processed"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -24,7 +25,7 @@ hetero = graph_ck.get("data", graph_ck)
 user_x = hetero['user'].x
 merch_x = hetero['merchant'].x
 edge_index = hetero['user','transacts','merchant'].edge_index
-edge_attr = hetero['user','transacts','merchant'].edge_attr  # shape: (500000, 7)
+edge_attr = hetero['user','transacts','merchant'].edge_attr
 
 num_edges = edge_index.size(1)
 num_users = user_x.size(0)
@@ -39,7 +40,7 @@ print("\nLoading model...")
 model = FraudGNNHybrid(
     user_in_dim=user_x.size(1),
     merchant_in_dim=merch_x.size(1),
-    edge_attr_dim=edge_attr.size(1),  # 7
+    edge_attr_dim=edge_attr.size(1),
     hidden_dim=128,
     relation_names=[('user','transacts','merchant'), ('merchant','receives','user')]
 )
@@ -57,24 +58,9 @@ with torch.no_grad():
     hetero['merchant'].x = merch_x.to(DEVICE)
     node_embs = model.forward_nodes(hetero)
 
-# Store node risk initially 0
-nodes = []
-
-for i in range(num_users):
-    nodes.append({
-        "id": f"user_{i}",
-        "type": "user",
-        "risk_score": 0.0,
-        "is_suspicious": False
-    })
-
-for j in range(num_merchants):
-    nodes.append({
-        "id": f"merch_{j}",
-        "type": "merchant",
-        "risk_score": 0.0,
-        "is_suspicious": False
-    })
+# Initialize node risk accumulators
+user_risks = defaultdict(list)
+merchant_risks = defaultdict(list)
 
 # -------------------------------------------------------------------
 # COMPUTE EDGE PREDICTIONS (in batches)
@@ -98,41 +84,149 @@ for start in tqdm(range(0, num_edges, batch_size)):
         logits = model.edge_classifier(src_h, dst_h, attr)
         probs = torch.softmax(logits, dim=1)[:, 1].cpu().tolist()
 
-    # store edges
+    # Store edges and accumulate node risks
     for i, p in zip(range(start, end), probs):
         u = int(edge_index[0, i])
         m = int(edge_index[1, i])
+        
         edge = {
             "edge_id": i,
             "source": f"user_{u}",
             "target": f"merch_{m}",
             "edge_attr": edge_attr[i].tolist(),
-            "amount": float(edge_attr[i][0].item()),  # assuming amount=attr[0]
+            "amount": float(edge_attr[i][0].item()),
             "pred_prob": float(p),
             "is_suspicious": p > 0.5
         }
         edges.append(edge)
 
-        # update node risk
-        risk_pct = p * 100
-        if risk_pct > nodes[u]["risk_score"]:
-            nodes[u]["risk_score"] = risk_pct
-            nodes[u]["is_suspicious"] = p > 0.5
-        merch_idx = num_users + m
-        if risk_pct > nodes[merch_idx]["risk_score"]:
-            nodes[merch_idx]["risk_score"] = risk_pct
-            nodes[merch_idx]["is_suspicious"] = p > 0.5
+        # Accumulate risks for averaging
+        user_risks[u].append(p)
+        merchant_risks[m].append(p)
+
+# -------------------------------------------------------------------
+# CALCULATE AVERAGE NODE RISKS
+# -------------------------------------------------------------------
+print("\nCalculating node risk scores...")
+
+nodes = []
+
+# Process users
+for i in range(num_users):
+    if i in user_risks:
+        # Average risk across all transactions
+        avg_risk = sum(user_risks[i]) / len(user_risks[i])
+        risk_pct = avg_risk * 100
+        
+        # More conservative threshold for flagging
+        is_suspicious = avg_risk > 0.7  # Changed from 0.5 to 0.7
+    else:
+        risk_pct = 0.0
+        is_suspicious = False
+    
+    nodes.append({
+        "id": f"user_{i}",
+        "type": "user",
+        "risk_score": round(risk_pct, 2),
+        "is_suspicious": is_suspicious,
+        "name": f"user_{i}",
+        "orig_id": i
+    })
+
+# Process merchants
+for j in range(num_merchants):
+    if j in merchant_risks:
+        # Average risk across all transactions
+        avg_risk = sum(merchant_risks[j]) / len(merchant_risks[j])
+        risk_pct = avg_risk * 100
+        
+        # More conservative threshold
+        is_suspicious = avg_risk > 0.7
+    else:
+        risk_pct = 0.0
+        is_suspicious = False
+    
+    nodes.append({
+        "id": f"merch_{j}",
+        "type": "merchant",
+        "risk_score": round(risk_pct, 2),
+        "is_suspicious": is_suspicious,
+        "name": f"merch_{j}",
+        "orig_id": j
+    })
+
+# -------------------------------------------------------------------
+# CALCULATE AND DISPLAY STATISTICS
+# -------------------------------------------------------------------
+print("\n" + "="*60)
+print("STATISTICS")
+print("="*60)
+
+# Overall stats
+total_nodes = len(nodes)
+suspicious_nodes = sum(1 for n in nodes if n['is_suspicious'])
+fraud_rate = (suspicious_nodes / total_nodes * 100) if total_nodes > 0 else 0
+
+print(f"\nNodes:")
+print(f"  Total: {total_nodes:,}")
+print(f"  Suspicious: {suspicious_nodes:,}")
+print(f"  Fraud Rate: {fraud_rate:.2f}%")
+
+# User stats
+user_nodes = [n for n in nodes if n['type'] == 'user']
+suspicious_users = sum(1 for n in user_nodes if n['is_suspicious'])
+user_fraud_rate = (suspicious_users / len(user_nodes) * 100) if user_nodes else 0
+
+print(f"\nUsers:")
+print(f"  Total: {len(user_nodes):,}")
+print(f"  Suspicious: {suspicious_users:,}")
+print(f"  Fraud Rate: {user_fraud_rate:.2f}%")
+
+# Merchant stats
+merchant_nodes = [n for n in nodes if n['type'] == 'merchant']
+suspicious_merchants = sum(1 for n in merchant_nodes if n['is_suspicious'])
+merchant_fraud_rate = (suspicious_merchants / len(merchant_nodes) * 100) if merchant_nodes else 0
+
+print(f"\nMerchants:")
+print(f"  Total: {len(merchant_nodes):,}")
+print(f"  Suspicious: {suspicious_merchants:,}")
+print(f"  Fraud Rate: {merchant_fraud_rate:.2f}%")
+
+# Edge stats
+total_edges = len(edges)
+suspicious_edges = sum(1 for e in edges if e['is_suspicious'])
+edge_fraud_rate = (suspicious_edges / total_edges * 100) if total_edges > 0 else 0
+
+print(f"\nEdges:")
+print(f"  Total: {total_edges:,}")
+print(f"  Suspicious: {suspicious_edges:,}")
+print(f"  Fraud Rate: {edge_fraud_rate:.2f}%")
+
+# Risk distribution
+risk_scores = [n['risk_score'] for n in nodes]
+print(f"\nRisk Score Distribution:")
+print(f"  Min: {min(risk_scores):.2f}%")
+print(f"  Max: {max(risk_scores):.2f}%")
+print(f"  Mean: {sum(risk_scores)/len(risk_scores):.2f}%")
+print(f"  Median: {sorted(risk_scores)[len(risk_scores)//2]:.2f}%")
 
 # -------------------------------------------------------------------
 # SAVE JSON
 # -------------------------------------------------------------------
-print("\nSaving JSON cache...")
+print("\n" + "="*60)
+print("SAVING FILES")
+print("="*60)
 
-with open(os.path.join(OUT_DIR, "nodes.json"), "w") as f:
-    json.dump(nodes, f)
+nodes_path = os.path.join(OUT_DIR, "nodes.json")
+edges_path = os.path.join(OUT_DIR, "edges.json")
 
-with open(os.path.join(OUT_DIR, "edges.json"), "w") as f:
-    json.dump(edges, f)
+with open(nodes_path, "w") as f:
+    json.dump(nodes, f, indent=2)
 
-print("\n✔ DONE — Cache ready.")
-print("files: cache/nodes.json + cache/edges.json")
+with open(edges_path, "w") as f:
+    json.dump(edges, f, indent=2)
+
+print(f"\n✓ Saved: {nodes_path}")
+print(f"✓ Saved: {edges_path}")
+print(f"\n✓ DONE - Cache ready for visualization")
+print(f"\nExpected fraud rate in visualization: {fraud_rate:.2f}%")
