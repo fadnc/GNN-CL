@@ -31,30 +31,66 @@
         }
 
         .header h1 {
-            font-size: 24px;
+            font-size: 26px;
+            font-weight: 800;
             color: #00eaff;
-            text-shadow: 0 0 10px rgba(0, 234, 255, 0.5);
+            text-shadow: 0 0 15px rgba(0, 234, 255, 0.7), 0 0 30px rgba(0, 234, 255, 0.4);
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(1.1); }
         }
 
         .header-stats {
             display: flex;
-            gap: 30px;
+            gap: 35px;
         }
 
         .stat-item {
             text-align: center;
+            padding: 8px 16px;
+            background: rgba(0, 234, 255, 0.05);
+            border-radius: 8px;
+            border: 1px solid rgba(0, 234, 255, 0.2);
+            min-width: 90px;
+            transition: all 0.3s;
+        }
+
+        .stat-item:hover {
+            background: rgba(0, 234, 255, 0.1);
+            border-color: rgba(0, 234, 255, 0.4);
+            transform: translateY(-2px);
         }
 
         .stat-value {
-            font-size: 22px;
-            font-weight: bold;
+            font-size: 24px;
+            font-weight: 800;
             color: #00eaff;
+            text-shadow: 0 0 10px rgba(0, 234, 255, 0.6);
+            margin-bottom: 4px;
+        }
+
+        .stat-value.fraud-rate {
+            color: #ff0066;
+            text-shadow: 0 0 10px rgba(255, 0, 102, 0.6);
+        }
+
+        .stat-value.accuracy {
+            color: #00ff88;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.6);
         }
 
         .stat-label {
-            font-size: 11px;
-            opacity: 0.7;
+            font-size: 10px;
+            opacity: 0.8;
             text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
         }
 
         /* Main Layout */
@@ -428,22 +464,22 @@
 <body>
     <!-- Header -->
     <div class="header">
-        <h1>⚡ GNN Fraud Detection System</h1>
+        <h1>GNN Fraud Detection System</h1>
         <div class="header-stats">
             <div class="stat-item">
                 <div class="stat-value" id="totalNodes">0</div>
-                <div class="stat-label">Total Nodes</div>
+                <div class="stat-label">Nodes</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value" id="totalEdges">0</div>
-                <div class="stat-label">Total Edges</div>
+                <div class="stat-label">Edges</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value" id="fraudRate">0%</div>
+                <div class="stat-value fraud-rate" id="fraudRate">0%</div>
                 <div class="stat-label">Fraud Rate</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value" id="accuracy">0%</div>
+                <div class="stat-value accuracy" id="accuracy">0%</div>
                 <div class="stat-label">Model Accuracy</div>
             </div>
         </div>
@@ -455,7 +491,7 @@
         <div class="sidebar">
             <!-- Graph Controls -->
             <div class="control-section">
-                <div class="section-title">📊 Graph Controls</div>
+                <div class="section-title">Graph Controls</div>
                 <div class="control-group">
                     <label class="control-label">Nodes</label>
                     <input id="nodesInput" type="number" class="control-input" value="50" min="10" max="500">
@@ -469,7 +505,7 @@
 
             <!-- Filters -->
             <div class="control-section">
-                <div class="section-title">🔍 Filters</div>
+                <div class="section-title">Filters</div>
                 <div class="control-group">
                     <label class="control-label">Risk Level</label>
                     <div class="filter-chips">
@@ -491,7 +527,7 @@
 
             <!-- GNN Model Info -->
             <div class="control-section">
-                <div class="section-title">🧠 Model Info</div>
+                <div class="section-title">Model Info</div>
                 <div class="info-card" style="padding: 12px;">
                     <div class="info-row">
                         <span class="info-label">Architecture</span>
@@ -588,26 +624,51 @@
                     <h3>Network Metrics</h3>
                     <div class="info-row">
                         <span class="info-label">Graph Density</span>
-                        <span class="info-value">0.342</span>
+                        <span class="info-value" id="metric-density">0.342</span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Avg Clustering</span>
-                        <span class="info-value">0.718</span>
+                        <span class="info-value" id="metric-clustering">0.718</span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Modularity</span>
-                        <span class="info-value">0.624</span>
+                        <span class="info-value" id="metric-modularity">0.624</span>
                     </div>
                     <div class="info-row" style="border: none;">
                         <span class="info-label">Communities</span>
-                        <span class="info-value">7</span>
+                        <span class="info-value" id="metric-communities">7</span>
+                    </div>
+                </div>
+
+                <div class="info-card">
+                    <h3>Fraud Distribution</h3>
+                    <div class="info-row">
+                        <span class="info-label">Total Transactions</span>
+                        <span class="info-value" id="total-transactions">0</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Suspicious Nodes</span>
+                        <span class="info-value" id="suspicious-nodes">0</span>
+                    </div>
+                    <div class="info-row" style="border: none;">
+                        <span class="info-label">Suspicious Edges</span>
+                        <span class="info-value" id="suspicious-edges">0</span>
+                    </div>
+                </div>
+
+                <div class="info-card">
+                    <h3>Detection Patterns</h3>
+                    <div id="fraud-patterns-container" style="margin-top: 15px;">
+                        <div class="badge badge-high" style="margin: 5px;">Rapid Transactions</div>
+                        <div class="badge badge-medium" style="margin: 5px;">Unusual Amounts</div>
+                        <div class="badge badge-high" style="margin: 5px;">Suspicious Network</div>
                     </div>
                 </div>
             </div>
 
             <!-- Alerts Tab -->
             <div class="tab-content" data-content="alerts">
-                <div class="timeline">
+                <div id="alerts-timeline" class="timeline">
                     <div class="timeline-item" style="border-left-color: #ff0066;">
                         <div class="timeline-time">2 min ago</div>
                         <div class="timeline-content">
@@ -620,6 +681,13 @@
                         <div class="timeline-content">
                             <div class="timeline-title" style="color: #ffa500;">⚠️ Suspicious Pattern</div>
                             <div class="timeline-desc">Multiple rapid transactions detected</div>
+                        </div>
+                    </div>
+                    <div class="timeline-item" style="border-left-color: #00eaff;">
+                        <div class="timeline-time">12 min ago</div>
+                        <div class="timeline-content">
+                            <div class="timeline-title" style="color: #00eaff;">ℹ️ New Node Added</div>
+                            <div class="timeline-desc">User_3421 joined network</div>
                         </div>
                     </div>
                 </div>
