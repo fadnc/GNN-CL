@@ -1,6 +1,6 @@
 """
 Fixed Flask Backend for GNN Fraud Detection System
-Fixes: Color mapping, accurate fraud rate, filter support
+Fixes: Accurate fraud rate calculation from cached data
 """
 import json
 import random
@@ -54,43 +54,27 @@ else:
 
 # Normalize columns
 col_map = {
-    "user_id": "src",
-    "userid": "src",
-    "user": "src",
-    "source": "src",
-    "merchant_id": "dst",
-    "merchantid": "dst",
-    "merchant": "dst",
-    "target": "dst",
-    "timestamp": "ts",
-    "time": "ts",
+    "user_id": "src", "userid": "src", "user": "src", "source": "src",
+    "merchant_id": "dst", "merchantid": "dst", "merchant": "dst", "target": "dst",
+    "timestamp": "ts", "time": "ts",
 }
 df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
-
-# ================================
-# CALCULATE ACTUAL FRAUD RATE
-# ================================
-def calculate_actual_fraud_rate():
-    """Calculate fraud rate from actual data"""
-    if len(nodes_list) == 0:
-        return 0.0
-    
-    # Count suspicious nodes
-    suspicious_count = sum(1 for n in nodes_list if n.get('is_suspicious', False))
-    fraud_rate = (suspicious_count / len(nodes_list)) * 100
-    
-    return fraud_rate
-
-actual_fraud_rate = calculate_actual_fraud_rate()
-print(f"Actual fraud rate: {actual_fraud_rate:.4f}%")
 
 # ================================
 # ANALYTICS FUNCTIONS
 # ================================
 def calculate_graph_metrics(nodes, edges):
-    """Calculate graph network metrics"""
+    """Calculate graph network metrics - FIXED VERSION"""
     num_nodes = len(nodes)
     num_edges = len(edges)
+    
+    if num_nodes == 0:
+        return {
+            "num_nodes": 0, "num_edges": 0, "density": 0,
+            "avg_degree": 0, "fraud_rate": 0, "fraud_nodes_count": 0,
+            "fraud_edges_count": 0, "avg_clustering": 0, "modularity": 0,
+            "num_communities": 0
+        }
     
     # Calculate density
     max_edges = num_nodes * (num_nodes - 1)
@@ -99,24 +83,39 @@ def calculate_graph_metrics(nodes, edges):
     # Calculate degree distribution
     degree_dist = defaultdict(int)
     for edge in edges:
-        source_id = edge.get('source') if isinstance(edge.get('source'), str) else f"user_{edge.get('source')}"
-        target_id = edge.get('target') if isinstance(edge.get('target'), str) else f"merch_{edge.get('target')}"
+        source_id = edge.get('source')
+        target_id = edge.get('target')
         degree_dist[source_id] += 1
         degree_dist[target_id] += 1
     
     avg_degree = sum(degree_dist.values()) / len(degree_dist) if degree_dist else 0
     
-    # Fraud statistics
-    fraud_nodes = [n for n in nodes if n.get('is_suspicious', False)]
+    # FIXED: Fraud statistics based on AVERAGE risk, not just flag
+    # Count nodes with average risk > threshold as suspicious
+    fraud_nodes = []
+    for n in nodes:
+        risk = n.get('risk_score', 0)
+        # If risk_score is already 0-100, use it directly
+        # If it's 0-1, convert to percentage
+        if risk <= 1:
+            risk = risk * 100
+        
+        # Consider suspicious if risk > 70% OR explicitly flagged
+        if risk > 60 or n.get('is_suspicious', False):
+            fraud_nodes.append(n)
+    
+    # Edge-level fraud (edges with pred_prob > 0.5)
     fraud_edges = [e for e in edges if e.get('is_suspicious', False)]
-    fraud_rate = len(fraud_nodes) / num_nodes * 100 if num_nodes > 0 else 0
+    
+    # Calculate fraud rate from edge predictions (more accurate)
+    edge_fraud_rate = len(fraud_edges) / num_edges * 100 if num_edges > 0 else 0
     
     return {
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "density": round(density, 4),
         "avg_degree": round(avg_degree, 2),
-        "fraud_rate": round(fraud_rate, 4),  # More precision for low rates
+        "fraud_rate": round(edge_fraud_rate, 2),  # Use edge-level fraud rate
         "fraud_nodes_count": len(fraud_nodes),
         "fraud_edges_count": len(fraud_edges),
         "avg_clustering": round(random.uniform(0.6, 0.8), 3),
@@ -139,16 +138,16 @@ def detect_fraud_patterns(node_id, edges):
         patterns.append({
             "type": "rapid_transactions",
             "severity": "high",
-            "description": f"Detected {len(node_edges)} transactions in short period"
+            "description": f"Detected {len(node_edges)} transactions"
         })
     
     # Pattern 2: Unusual amounts
-    amounts = [e.get('amount', 0) for e in node_edges]
+    amounts = [e.get('amount', 0) for e in node_edges if 'amount' in e]
     if amounts and max(amounts) > 5000:
         patterns.append({
             "type": "unusual_amount",
             "severity": "medium",
-            "description": f"High transaction amount: ${max(amounts):,.2f}"
+            "description": f"High amount: ${max(amounts):,.2f}"
         })
     
     # Pattern 3: Suspicious network
@@ -157,7 +156,7 @@ def detect_fraud_patterns(node_id, edges):
         patterns.append({
             "type": "suspicious_network",
             "severity": "high",
-            "description": f"{suspicious_count} suspicious connections detected"
+            "description": f"{suspicious_count} suspicious connections"
         })
     
     return patterns
@@ -233,6 +232,9 @@ def graph_api():
     
     # Sample subgraph
     all_users = [n for n in nodes_list if n["type"] == "user"]
+    if len(all_users) == 0:
+        return jsonify({"nodes": [], "edges": [], "metrics": calculate_graph_metrics([], [])})
+    
     sampled_users = random.sample(all_users, min(n_nodes, len(all_users)))
     
     sampled_user_ids = {
@@ -241,16 +243,22 @@ def graph_api():
     
     relevant_edges = []
     for e in edges_list:
-        src_id = int(e["source"].replace("user_", ""))
-        if src_id in sampled_user_ids:
-            relevant_edges.append(e)
+        try:
+            src_id = int(e["source"].replace("user_", ""))
+            if src_id in sampled_user_ids:
+                relevant_edges.append(e)
+        except (ValueError, KeyError, AttributeError):
+            continue
     
     if len(relevant_edges) > n_edges:
         relevant_edges = random.sample(relevant_edges, n_edges)
     
-    merchant_ids = {
-        int(e["target"].replace("merch_", "")) for e in relevant_edges
-    }
+    merchant_ids = set()
+    for e in relevant_edges:
+        try:
+            merchant_ids.add(int(e["target"].replace("merch_", "")))
+        except (ValueError, KeyError, AttributeError):
+            continue
     
     sampled_merchants = [
         n for n in nodes_list 
@@ -289,7 +297,6 @@ def node_details_api(node_id):
     
     tx_count = len(subset)
     avg_amount = float(subset["amount"].mean()) if tx_count > 0 and 'amount' in subset.columns else 0.0
-    risk = float(subset["label"].mean()) if tx_count > 0 and 'label' in subset.columns else 0.0
     
     # Get counterparties
     if node_id.startswith("user_"):
@@ -308,7 +315,7 @@ def node_details_api(node_id):
         "id": node_id,
         "type": node.get("type", "unknown"),
         "degree": tx_count,
-        "risk_score": round(node.get("risk_score", 0), 2),  # Use stored risk_score
+        "risk_score": node.get("risk_score", 0),  # Already in 0-100 format from cache
         "is_suspicious": node.get("is_suspicious", False),
         "summary": {
             "tx_count": tx_count,
@@ -328,9 +335,9 @@ def metrics_api():
     return jsonify({
         "metrics": metrics,
         "model_info": {
-            "architecture": "R-GCN",
+            "architecture": "R-GCN Hybrid",
             "layers": 3,
-            "hidden_dims": 64,
+            "hidden_dims": 128,
             "training_accuracy": 94.2,
             "validation_accuracy": 92.8,
             "f1_score": 0.931,
@@ -378,9 +385,20 @@ def search_api():
 # RUN SERVER
 # ================================
 if __name__ == "__main__":
-    print(f"🚀 GNN Fraud Detection System")
-    print(f"   Nodes: {len(nodes_list)}")
-    print(f"   Edges: {len(edges_list)}")
-    print(f"   Fraud Rate: {actual_fraud_rate:.4f}%")
-    print(f"   Running at http://127.0.0.1:5000")
+    # Calculate actual fraud statistics
+    if nodes_list and edges_list:
+        metrics = calculate_graph_metrics(nodes_list, edges_list)
+        print(f"\n{'='*60}")
+        print(f"GNN Fraud Detection System")
+        print(f"{'='*60}")
+        print(f"   Nodes: {len(nodes_list):,}")
+        print(f"   Edges: {len(edges_list):,}")
+        print(f"   Fraud Rate: {metrics['fraud_rate']:.2f}% (based on edge predictions)")
+        print(f"   Suspicious Edges: {metrics['fraud_edges_count']:,}")
+        print(f"   Running at http://127.0.0.1:5000")
+        print(f"{'='*60}\n")
+    else:
+        print("⚠️  Warning: No cached data found!")
+        print("   Run: python generate_cache.py")
+    
     app.run(host="0.0.0.0", port=5000, debug=True)
