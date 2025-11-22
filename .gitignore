@@ -26,3 +26,6 @@ ipython_config.py
 
 # PEP 582
 __pypackages__/
+
+.pt
+.pth
